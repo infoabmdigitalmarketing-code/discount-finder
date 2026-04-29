@@ -5,31 +5,57 @@ on:
     - cron: '0 */6 * * *'
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
     timeout-minutes: 50
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-      
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: 'crawler/requirements.txt'
-      
+
       - name: Install packages
         run: |
-          pip install -r crawler/requirements.txt
-      
-      - name: Run crawler
+          python -m pip install --upgrade pip setuptools wheel
+          pip install requests==2.31.0
+          pip install beautifulsoup4==4.12.2
+          pip install lxml==5.1.0
+          pip install fake-useragent==1.4.0
+          pip install supabase==2.3.4
+          pip install python-dotenv==1.0.0
+          pip install price-parser==0.3.4
+          echo "All packages installed!"
+          python -c "import requests; print('requests OK')"
+          python -c "import bs4; print('beautifulsoup4 OK')"
+          python -c "from supabase import create_client; print('supabase OK')"
+
+      - name: Check Secrets
+        run: |
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "ERROR: SUPABASE_URL is missing!"
+            exit 1
+          fi
+          if [ -z "$SUPABASE_SERVICE_KEY" ]; then
+            echo "ERROR: SUPABASE_SERVICE_KEY is missing!"
+            exit 1
+          fi
+          echo "Secrets are present!"
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+      - name: Run Crawler
         run: |
           cd crawler
           python main.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
