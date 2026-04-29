@@ -1,465 +1,359 @@
-"""
-Main Crawler - Runs on GitHub Actions every 6 hours
-Finds discounts from brand websites
-"""
-
 import os
 import sys
 import time
 import random
 import logging
 import requests
-from bs4 import BeautifulSoup
-from fake_useragent import UserAgent
-from supabase import create_client
 import re
-from urllib.parse import urlparse
-from xml.etree import ElementTree as ET
+import json
+from bs4 import BeautifulSoup
+from supabase import create_client
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s]: %(message)s'
+    format='%(asctime)s [INFO]: %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 
 SALE_KEYWORDS = [
     'sale', 'discount', 'offer', 'deal', 'promo',
-    'clearance', 'off', 'savings', 'special', 'coupon',
-    'percent', 'reduced', 'markdown', 'bargain'
+    'clearance', 'off', 'savings', 'coupon', 'percent'
 ]
 
-FALLBACK_USER_AGENTS = [
+AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/119.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
 ]
 
-# ============================================================
-# USER AGENT ROTATION
-# ============================================================
-def get_random_headers():
-    """Get random browser headers to avoid blocking"""
-    try:
-        ua = UserAgent()
-        user_agent = ua.random
-    except Exception:
-        user_agent = random.choice(FALLBACK_USER_AGENTS)
-    
+
+def get_headers():
     return {
-        "User-Agent": user_agent,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "User-Agent": random.choice(AGENTS),
+        "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "DNT": "1",
         "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1"
     }
 
-# ============================================================
-# SITEMAP CRAWLER
-# ============================================================
-def fetch_sitemap_urls(sitemap_url):
-    """Fetch URLs from sitemap XML"""
-    sale_urls = []
-    
+
+def fetch_sitemap(url, depth=0):
+    if depth > 1:
+        return []
+    urls = []
     try:
-        logger.info(f"📄 Fetching sitemap: {sitemap_url}")
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; DiscountBot/1.0)",
-            "Accept": "application/xml,text/xml,*/*"
-        }
-        
-        response = requests.get(sitemap_url, headers=headers, timeout=15)
-        
-        if response.status_code != 200:
-            logger.warning(f"Sitemap returned {response.status_code}")
+        logger.info(f"Fetching: {url}")
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)"},
+            timeout=15
+        )
+        if r.status_code != 200:
             return []
-        
-        content = response.text
-        
-        # Check if sitemap index
+        content = r.text
         if '<sitemapindex' in content:
-            logger.info("Found sitemap index, looking for sale sitemaps...")
-            try:
-                root = ET.fromstring(content)
-                ns = '{http://www.sitemaps.org/schemas/sitemap/0.9}'
-                
-                for sitemap in root.iter(f'{ns}sitemap'):
-                    loc = sitemap.find(f'{ns}loc')
-                    if loc is not None and loc.text:
-                        sub_url = loc.text.strip()
-                        # Check if sub-sitemap is sale related
-                        if any(kw in sub_url.lower() for kw in ['sale', 'deal', 'offer', 'discount']):
-                            time.sleep(random.uniform(1, 2))
-                            sub_urls = fetch_sitemap_urls(sub_url)
-                            sale_urls.extend(sub_urls[:20])
-                            
-            except ET.ParseError:
-                pass
-                
-        # Regular sitemap
+            soup = BeautifulSoup(content, 'html.parser')
+            for loc in soup.find_all('loc'):
+                sub = loc.get_text(strip=True)
+                if any(k in sub.lower() for k in SALE_KEYWORDS):
+                    time.sleep(1)
+                    urls.extend(fetch_sitemap(sub, depth + 1)[:10])
         elif '<urlset' in content:
-            try:
-                root = ET.fromstring(content)
-                ns = '{http://www.sitemaps.org/schemas/sitemap/0.9}'
-                
-                for url_elem in root.iter(f'{ns}url'):
-                    loc = url_elem.find(f'{ns}loc')
-                    if loc is not None and loc.text:
-                        url = loc.text.strip()
-                        # Filter sale URLs
-                        if any(kw in url.lower() for kw in SALE_KEYWORDS):
-                            sale_urls.append(url)
-                            
-            except ET.ParseError:
-                # Try BeautifulSoup as fallback
-                soup = BeautifulSoup(content, 'lxml-xml')
-                for loc in soup.find_all('loc'):
-                    url = loc.get_text(strip=True)
-                    if any(kw in url.lower() for kw in SALE_KEYWORDS):
-                        sale_urls.append(url)
-        
-        logger.info(f"✅ Found {len(sale_urls)} sale URLs in sitemap")
-        return sale_urls[:30]  # Limit to 30 URLs per sitemap
-        
+            soup = BeautifulSoup(content, 'html.parser')
+            for loc in soup.find_all('loc'):
+                u = loc.get_text(strip=True)
+                if any(k in u.lower() for k in SALE_KEYWORDS):
+                    urls.append(u)
     except Exception as e:
         logger.error(f"Sitemap error: {e}")
-        return []
+    return urls[:20]
 
-# ============================================================
-# PAGE PARSER
-# ============================================================
-def parse_page_for_discounts(url, html_content):
-    """Extract discount info from a page"""
-    
-    soup = BeautifulSoup(html_content, 'lxml')
-    result = {
-        'title': '',
-        'description': '',
-        'image_url': '',
-        'discount_percentage': None,
-        'original_price': None,
-        'discounted_price': None,
-        'coupon_code': None,
+
+def parse_page(html):
+    soup = BeautifulSoup(html, 'html.parser')
+    data = {
+        'title': '', 'image_url': '', 'description': '',
+        'discount_percentage': None, 'original_price': None,
+        'discounted_price': None, 'coupon_code': None,
         'confidence': 0.0
     }
-    
-    confidence = 0.0
-    
-    # ── Get Title ──
-    og_title = soup.find('meta', property='og:title')
-    if og_title and og_title.get('content'):
-        result['title'] = og_title['content'].strip()
-        confidence += 0.2
+    conf = 0.0
+
+    og = soup.find('meta', property='og:title')
+    if og and og.get('content'):
+        data['title'] = og['content'].strip()
+        conf += 0.2
+    elif soup.find('h1'):
+        data['title'] = soup.find('h1').get_text(strip=True)
+        conf += 0.1
     elif soup.find('title'):
-        result['title'] = soup.find('title').get_text(strip=True)
-        confidence += 0.1
-    
-    # ── Get Description ──
-    og_desc = soup.find('meta', property='og:description')
-    if og_desc and og_desc.get('content'):
-        result['description'] = og_desc['content'].strip()
-    
-    # ── Get Image ──
-    og_image = soup.find('meta', property='og:image')
-    if og_image and og_image.get('content'):
-        result['image_url'] = og_image['content'].strip()
-    
-    # ── Find Discount Percentage ──
-    text_content = soup.get_text(separator=' ', strip=True)
-    
-    percent_patterns = [
-        r'(\d{1,2})\s*%\s*(?:off|discount|savings?)',
-        r'(?:save|saving)\s+(\d{1,2})\s*%',
-        r'(\d{1,2})\s*percent\s*off',
-    ]
-    
-    for pattern in percent_patterns:
-        matches = re.findall(pattern, text_content, re.IGNORECASE)
-        if matches:
-            pct = int(matches[0])
-            if 5 <= pct <= 90:
-                result['discount_percentage'] = pct
-                confidence += 0.3
-                break
-    
-    # ── Find Prices ──
-    # Original price (was/regular/original)
-    was_pattern = r'(?:was|original|reg\.?|regular|retail)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)'
-    was_match = re.search(was_pattern, text_content, re.IGNORECASE)
-    if was_match:
+        data['title'] = soup.find('title').get_text(strip=True)
+        conf += 0.05
+
+    img = soup.find('meta', property='og:image')
+    if img and img.get('content'):
+        data['image_url'] = img['content'].strip()
+
+    desc = soup.find('meta', property='og:description')
+    if desc and desc.get('content'):
+        data['description'] = desc['content'].strip()
+
+    text = soup.get_text(separator=' ', strip=True)
+
+    for pat in [r'(\d{1,2})\s*%\s*off', r'save\s+(\d{1,2})\s*%', r'(\d{1,2})\s*%\s*discount']:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                pct = int(m.group(1))
+                if 5 <= pct <= 90:
+                    data['discount_percentage'] = pct
+                    conf += 0.35
+                    break
+            except ValueError:
+                pass
+
+    was = re.search(r'(?:was|original|regular)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)', text, re.IGNORECASE)
+    if was:
         try:
-            price = float(was_match.group(1).replace(',', ''))
-            if 0 < price < 100000:
-                result['original_price'] = price
-                confidence += 0.15
+            data['original_price'] = float(was.group(1).replace(',', ''))
+            conf += 0.15
         except ValueError:
             pass
-    
-    # Sale price (now/sale/today)
-    now_pattern = r'(?:now|sale|today|special)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)'
-    now_match = re.search(now_pattern, text_content, re.IGNORECASE)
-    if now_match:
+
+    now = re.search(r'(?:now|sale|today)\s*:?\s*\$?\s*([\d,]+(?:\.\d{2})?)', text, re.IGNORECASE)
+    if now:
         try:
-            price = float(now_match.group(1).replace(',', ''))
-            if 0 < price < 100000:
-                result['discounted_price'] = price
-                confidence += 0.15
+            data['discounted_price'] = float(now.group(1).replace(',', ''))
+            conf += 0.15
         except ValueError:
             pass
-    
-    # ── Find Coupon Code ──
-    coupon_patterns = [
-        r'(?:use\s+code|coupon|promo\s+code)\s*:?\s*["\']?([A-Z0-9]{4,15})["\']?',
-        r'(?:discount\s+code)\s*:?\s*["\']?([A-Z0-9]{4,15})["\']?',
-    ]
-    
-    for pattern in coupon_patterns:
-        matches = re.findall(pattern, text_content, re.IGNORECASE)
-        if matches:
-            code = matches[0].upper()
-            if code not in ['HTML', 'HTTP', 'FREE', 'SALE', 'SHOP']:
-                result['coupon_code'] = code
-                confidence += 0.1
-                break
-    
-    # ── Schema.org JSON-LD ──
-    import json
-    scripts = soup.find_all('script', type='application/ld+json')
-    for script in scripts:
+
+    coup = re.search(r'(?:use\s+code|coupon|promo)\s*:?\s*["\']?([A-Z0-9]{4,15})["\']?', text, re.IGNORECASE)
+    if coup:
+        code = coup.group(1).upper()
+        if code not in ['HTML', 'HTTP', 'FREE', 'SALE', 'SHOP', 'HERE']:
+            data['coupon_code'] = code
+            conf += 0.1
+
+    for script in soup.find_all('script', type='application/ld+json'):
         try:
-            data = json.loads(script.string or '{}')
-            items = data if isinstance(data, list) else [data]
+            jd = json.loads(script.string or '{}')
+            items = jd if isinstance(jd, list) else [jd]
             for item in items:
                 if item.get('@type') in ['Product', 'Offer']:
-                    if not result['title'] and item.get('name'):
-                        result['title'] = item['name']
-                    offers = item.get('offers', item)
-                    if isinstance(offers, list):
-                        offers = offers[0] if offers else {}
-                    if isinstance(offers, dict):
-                        price = offers.get('price')
-                        if price and not result['discounted_price']:
-                            try:
-                                result['discounted_price'] = float(str(price))
-                                confidence += 0.2
-                            except (ValueError, TypeError):
-                                pass
+                    if not data['title'] and item.get('name'):
+                        data['title'] = item['name']
+                        conf += 0.1
+                    off = item.get('offers', {})
+                    if isinstance(off, list):
+                        off = off[0] if off else {}
+                    if isinstance(off, dict) and off.get('price') and not data['discounted_price']:
+                        try:
+                            data['discounted_price'] = float(str(off['price']))
+                            conf += 0.2
+                        except (ValueError, TypeError):
+                            pass
         except Exception:
             pass
-    
-    result['confidence'] = min(confidence, 1.0)
-    return result
 
-# ============================================================
-# AFFILIATE LINK TRANSFORMER
-# ============================================================
-AFFILIATE_CONFIG = {
-    'amazon.com': {'param': 'tag', 'value': 'yourtag-20'},
-    'walmart.com': {'param': 'wmlspartner', 'value': 'your_tag'},
-    'nike.com': {'param': 'cp', 'value': 'your_nike_tag'},
-    'blacktieattire.org': {'param': 'ref', 'value': 'discount_finder'},
-}
+    data['confidence'] = min(conf, 1.0)
+    return data
 
-def transform_to_affiliate(url, domain):
-    """Add affiliate parameters to URL"""
-    config = None
-    
-    for configured_domain, cfg in AFFILIATE_CONFIG.items():
-        if configured_domain in domain:
-            config = cfg
-            break
-    
-    if not config:
-        return url
-    
-    separator = '&' if '?' in url else '?'
-    return f"{url}{separator}{config['param']}={config['value']}"
 
-# ============================================================
-# DATABASE OPERATIONS
-# ============================================================
-def save_to_supabase(supabase, discount_data):
-    """Save discount to Supabase database"""
-    try:
-        response = supabase.table('discounts').upsert(
-            discount_data,
-            on_conflict='brand_id,discount_url'
-        ).execute()
-        return True
-    except Exception as e:
-        logger.error(f"DB save error: {e}")
-        return False
+def make_affiliate(url, domain):
+    aff = {
+        'amazon.com': ('tag', 'yourtag-20'),
+        'nike.com': ('cp', 'your_nike_tag'),
+        'asos.com': ('affid', 'your_asos_id'),
+        'blacktieattire.org': ('ref', 'discount_finder'),
+    }
+    for d, (p, v) in aff.items():
+        if d in domain:
+            sep = '&' if '?' in url else '?'
+            return f"{url}{sep}{p}={v}"
+    return url
 
-# ============================================================
-# MAIN CRAWLER FUNCTION
-# ============================================================
+
 def run_crawler():
-    """Main crawler - processes all active brands"""
-    
     logger.info("=" * 50)
     logger.info("🚀 DISCOUNT CRAWLER STARTED")
     logger.info("=" * 50)
-    
-    # Connect to Supabase
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        logger.error("❌ Missing Supabase credentials!")
+
+    if not SUPABASE_URL:
+        logger.error("❌ SUPABASE_URL missing!")
         sys.exit(1)
-    
-    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-    logger.info("✅ Connected to Supabase")
-    
-    # Get brands to crawl
+    if not SUPABASE_KEY:
+        logger.error("❌ SUPABASE_SERVICE_KEY missing!")
+        sys.exit(1)
+
+    logger.info(f"URL: {SUPABASE_URL[:30]}...")
+
+    # Connect
     try:
-        brands_response = supabase.table('brands').select('*').eq('is_active', True).eq('crawl_enabled', True).order('last_crawled_at', nullsfirst=True).limit(5).execute()
-        brands = brands_response.data or []
+        db = create_client(SUPABASE_URL, SUPABASE_KEY)
+        logger.info("✅ Connected to Supabase")
     except Exception as e:
-        logger.error(f"❌ Cannot fetch brands: {e}")
+        logger.error(f"❌ Connection failed: {e}")
         sys.exit(1)
-    
+
+    # Get brands - multiple attempts
+    brands = []
+
+    # Attempt 1: Filter active brands
+    try:
+        resp = db.table('brands').select('*').eq('is_active', True).eq('crawl_enabled', True).limit(5).execute()
+        brands = resp.data or []
+        logger.info(f"✅ Got {len(brands)} brands (attempt 1)")
+    except Exception as e:
+        logger.warning(f"Attempt 1 failed: {e}")
+
+    # Attempt 2: Get all brands
     if not brands:
-        logger.warning("⚠️ No brands found to crawl")
-        return
-    
-    logger.info(f"📋 Found {len(brands)} brands to process")
-    
-    # Stats
-    total_discounts = 0
-    total_saved = 0
-    
-    # Process each brand
+        try:
+            resp = db.table('brands').select('*').limit(10).execute()
+            brands = resp.data or []
+            logger.info(f"✅ Got {len(brands)} brands (attempt 2)")
+        except Exception as e:
+            logger.warning(f"Attempt 2 failed: {e}")
+
+    # Attempt 3: Direct REST API
+    if not brands:
+        try:
+            headers = {
+                'apikey': SUPABASE_KEY,
+                'Authorization': f'Bearer {SUPABASE_KEY}',
+                'Content-Type': 'application/json',
+            }
+            r = requests.get(
+                f"{SUPABASE_URL}/rest/v1/brands?select=*&limit=10",
+                headers=headers,
+                timeout=10
+            )
+            if r.status_code == 200:
+                brands = r.json()
+                logger.info(f"✅ Got {len(brands)} brands (attempt 3)")
+            else:
+                logger.error(f"REST API failed: {r.status_code} - {r.text}")
+        except Exception as e:
+            logger.error(f"Attempt 3 failed: {e}")
+
+    if not brands:
+        logger.error("❌ Could not fetch brands from database!")
+        logger.error("Please run SQL schema in Supabase SQL Editor")
+        sys.exit(1)
+
+    logger.info(f"📋 Processing {len(brands)} brands")
+    total = 0
+
     for brand in brands:
-        brand_name = brand.get('name', 'Unknown')
-        brand_id = brand.get('id')
-        brand_domain = brand.get('domain', '')
-        sitemap_urls = brand.get('sitemap_urls', [])
-        currency_symbol = brand.get('currency_symbol', '$')
-        
-        logger.info(f"\n🏪 Processing: {brand_name}")
-        
-        # Get sale URLs from sitemap
-        all_sale_urls = []
-        
-        for sitemap_url in sitemap_urls:
-            urls = fetch_sitemap_urls(sitemap_url)
-            all_sale_urls.extend(urls)
-            time.sleep(random.uniform(1, 2))
-        
-        # If no sitemap configured, try common locations
-        if not sitemap_urls:
-            common_sitemaps = [
-                f"https://www.{brand_domain}/sitemap.xml",
-                f"https://www.{brand_domain}/sitemap_index.xml",
-            ]
-            for sitemap_url in common_sitemaps:
-                urls = fetch_sitemap_urls(sitemap_url)
-                if urls:
-                    all_sale_urls.extend(urls)
+        name = brand.get('name', '?')
+        bid = brand.get('id', '')
+        domain = brand.get('domain', '')
+        sitemaps = brand.get('sitemap_urls') or []
+        currency = brand.get('currency_symbol', '$')
+
+        if not brand.get('is_active', True):
+            continue
+        if not brand.get('crawl_enabled', True):
+            continue
+
+        logger.info(f"\n--- {name} ({domain}) ---")
+
+        # Get URLs
+        all_urls = []
+        for sm in sitemaps:
+            found = fetch_sitemap(sm)
+            all_urls.extend(found)
+            time.sleep(1)
+
+        if not all_urls and domain:
+            for sm in [
+                f"https://www.{domain}/sitemap.xml",
+                f"https://{domain}/sitemap.xml",
+            ]:
+                found = fetch_sitemap(sm)
+                if found:
+                    all_urls.extend(found)
                     break
-        
-        logger.info(f"🔗 Found {len(all_sale_urls)} sale URLs for {brand_name}")
-        
-        brand_discounts = []
-        
-        # Process each URL
-        for i, url in enumerate(all_sale_urls[:20]):  # Max 20 per brand
-            logger.info(f"  [{i+1}/{min(len(all_sale_urls), 20)}] {url[:60]}...")
-            
+                time.sleep(1)
+
+        all_urls = list(set(all_urls))
+        logger.info(f"URLs found: {len(all_urls)}")
+
+        saved = 0
+        for i, url in enumerate(all_urls[:10]):
+            logger.info(f"  [{i+1}] {url[:60]}")
             try:
-                headers = get_random_headers()
-                response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-                
-                if response.status_code != 200:
+                r = requests.get(url, headers=get_headers(), timeout=12, allow_redirects=True)
+                if r.status_code != 200:
                     continue
-                
-                if 'text/html' not in response.headers.get('Content-Type', ''):
+                if 'text/html' not in r.headers.get('Content-Type', ''):
                     continue
-                
-                # Parse the page
-                discount = parse_page_for_discounts(url, response.text)
-                
-                # Filter low quality
-                if discount['confidence'] < 0.3:
+
+                disc = parse_page(r.text)
+
+                if disc['confidence'] < 0.25:
                     continue
-                
-                if not discount['title']:
+                if not disc['title']:
                     continue
-                
-                # Must have some discount info
-                has_discount_info = (
-                    discount['discount_percentage'] or 
-                    discount['coupon_code'] or
-                    (discount['original_price'] and discount['discounted_price'])
+
+                has_deal = (
+                    disc['discount_percentage'] is not None or
+                    disc['coupon_code'] is not None or
+                    (disc['original_price'] and disc['discounted_price'])
                 )
-                
-                if not has_discount_info:
+                if not has_deal:
                     continue
-                
-                # Create affiliate URL
-                affiliate_url = transform_to_affiliate(url, brand_domain)
-                
-                # Prepare DB record
-                db_record = {
-                    'brand_id': brand_id,
-                    'title': discount['title'][:500],
-                    'description': (discount['description'] or '')[:1000],
+
+                record = {
+                    'brand_id': bid,
+                    'title': disc['title'][:400],
+                    'description': (disc['description'] or '')[:800],
                     'discount_url': url,
-                    'affiliate_url': affiliate_url,
-                    'image_url': discount['image_url'],
-                    'original_price': discount['original_price'],
-                    'discounted_price': discount['discounted_price'],
-                    'discount_percentage': discount['discount_percentage'],
-                    'currency_symbol': currency_symbol,
-                    'coupon_code': discount['coupon_code'],
+                    'affiliate_url': make_affiliate(url, domain),
+                    'image_url': disc['image_url'] or None,
+                    'original_price': disc['original_price'],
+                    'discounted_price': disc['discounted_price'],
+                    'discount_percentage': disc['discount_percentage'],
+                    'currency_symbol': currency,
+                    'coupon_code': disc['coupon_code'],
                     'source_type': 'sitemap',
-                    'confidence_score': discount['confidence'],
+                    'confidence_score': round(disc['confidence'], 3),
                     'is_active': True,
-                    'is_expired': False
+                    'is_expired': False,
                 }
-                
-                brand_discounts.append(db_record)
-                total_discounts += 1
-                
-                logger.info(f"  ✅ Discount: {discount['discount_percentage'] or '?'}% off | {discount['title'][:40]}")
-                
+
+                try:
+                    db.table('discounts').upsert(
+                        record,
+                        on_conflict='brand_id,discount_url'
+                    ).execute()
+                    saved += 1
+                    total += 1
+                    logger.info(f"  ✅ Saved: {disc['discount_percentage'] or '?'}% | {disc['title'][:40]}")
+                except Exception as e:
+                    logger.warning(f"  Save error: {e}")
+
             except Exception as e:
                 logger.debug(f"  Error: {e}")
-            
-            # Polite delay
+
             time.sleep(random.uniform(2, 4))
-        
-        # Save to database
-        if brand_discounts:
-            for record in brand_discounts:
-                if save_to_supabase(supabase, record):
-                    total_saved += 1
-        
-        # Update brand crawl time
+
+        # Update crawl time
         try:
-            supabase.table('brands').update({
-                'last_crawled_at': 'now()'
-            }).eq('id', brand_id).execute()
-        except Exception as e:
-            logger.warning(f"Could not update crawl time: {e}")
-        
-        logger.info(f"✅ {brand_name}: Saved {len(brand_discounts)} discounts")
-        
-        # Delay between brands
-        time.sleep(random.uniform(5, 10))
-    
-    # Summary
+            db.table('brands').update(
+                {'last_crawled_at': 'now()'}
+            ).eq('id', bid).execute()
+        except Exception:
+            pass
+
+        logger.info(f"  => Saved {saved} discounts for {name}")
+        time.sleep(random.uniform(3, 6))
+
     logger.info("\n" + "=" * 50)
-    logger.info("📊 CRAWL COMPLETE")
-    logger.info(f"💎 Discounts found: {total_discounts}")
-    logger.info(f"💾 Discounts saved: {total_saved}")
+    logger.info(f"✅ DONE! Total saved: {total}")
     logger.info("=" * 50)
 
 
