@@ -24,30 +24,30 @@ jobs:
 
       - name: Install packages
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install requests==2.31.0
-          pip install beautifulsoup4==4.12.2
-          pip install lxml==5.1.0
-          pip install fake-useragent==1.4.0
-          pip install supabase==2.3.4
-          pip install python-dotenv==1.0.0
-          pip install price-parser==0.3.4
-          echo "All packages installed!"
-          python -c "import requests; print('requests OK')"
-          python -c "import bs4; print('beautifulsoup4 OK')"
-          python -c "from supabase import create_client; print('supabase OK')"
+          python -m pip install --upgrade pip
+          pip install -r crawler/requirements.txt
+          echo "✅ All packages installed!"
+
+      - name: Verify packages
+        run: |
+          python -c "import requests; print('✅ requests OK')"
+          python -c "import bs4; print('✅ beautifulsoup4 OK')"
+          python -c "import fake_useragent; print('✅ fake_useragent OK')"
+          python -c "from supabase import create_client; print('✅ supabase OK')"
+          echo "✅ All imports working!"
 
       - name: Check Secrets
         run: |
           if [ -z "$SUPABASE_URL" ]; then
-            echo "ERROR: SUPABASE_URL is missing!"
+            echo "❌ SUPABASE_URL is missing!"
             exit 1
           fi
           if [ -z "$SUPABASE_SERVICE_KEY" ]; then
-            echo "ERROR: SUPABASE_SERVICE_KEY is missing!"
+            echo "❌ SUPABASE_SERVICE_KEY is missing!"
             exit 1
           fi
-          echo "Secrets are present!"
+          echo "✅ Both secrets found!"
+          echo "URL: ${SUPABASE_URL:0:30}..."
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
